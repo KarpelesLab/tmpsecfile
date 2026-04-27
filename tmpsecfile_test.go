@@ -326,6 +326,78 @@ func TestTruncateShrinkThenExtendDoesNotLeak(t *testing.T) {
 	}
 }
 
+func TestIsSparseFlag(t *testing.T) {
+	cases := []struct {
+		name string
+		do   func(*File) error
+		want bool
+	}{
+		{
+			name: "fresh file is not sparse",
+			do:   func(f *File) error { return nil },
+			want: false,
+		},
+		{
+			name: "contiguous write does not set the flag",
+			do: func(f *File) error {
+				_, err := f.WriteAt(bytes.Repeat([]byte("x"), 100), 0)
+				return err
+			},
+			want: false,
+		},
+		{
+			name: "unaligned write within the same rounded block does not set the flag",
+			do: func(f *File) error {
+				_, err := f.WriteAt([]byte("hello"), 13)
+				return err
+			},
+			want: false,
+		},
+		{
+			name: "write that skips a full block sets the flag",
+			do: func(f *File) error {
+				_, err := f.WriteAt([]byte("hi"), 100)
+				return err
+			},
+			want: true,
+		},
+		{
+			name: "truncate that extends past the rounded length sets the flag",
+			do: func(f *File) error {
+				if _, err := f.WriteAt([]byte("x"), 0); err != nil {
+					return err
+				}
+				return f.Truncate(1 << 16)
+			},
+			want: true,
+		},
+		{
+			name: "truncate that shrinks does not set the flag",
+			do: func(f *File) error {
+				if _, err := f.WriteAt(bytes.Repeat([]byte("x"), 100), 0); err != nil {
+					return err
+				}
+				return f.Truncate(10)
+			},
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newTest(t)
+			if err := tc.do(f); err != nil {
+				t.Fatalf("setup: %v", err)
+			}
+			f.mu.Lock()
+			got := f.isSparse
+			f.mu.Unlock()
+			if got != tc.want {
+				t.Fatalf("isSparse = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestAnonymousOnLinux(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("O_TMPFILE only on Linux")

@@ -26,9 +26,10 @@ type File struct {
 	f     *os.File
 	block cipher.Block
 
-	mu     sync.Mutex
-	pos    int64
-	length int64
+	mu       sync.Mutex
+	pos      int64
+	length   int64
+	isSparse bool // true once any write or truncate has left a never-written AES block on disk
 }
 
 // New creates a new anonymous encrypted temporary file.
@@ -136,6 +137,11 @@ func (f *File) WriteAt(p []byte, off int64) (int, error) {
 	n, err := f.f.WriteAt(enc, blkStart)
 	if n >= bufLen {
 		f.mu.Lock()
+		// blkStart > rounded-up old length means the OS extended the file
+		// with at least one untouched (sparse) AES block before this write.
+		if blkStart > (f.length+int64(aesBlockSize-1))&^int64(aesBlockSize-1) {
+			f.isSparse = true
+		}
 		if end > f.length {
 			f.length = end
 		}
@@ -152,6 +158,9 @@ func (f *File) WriteAt(p []byte, off int64) (int, error) {
 	}
 	if written > 0 {
 		f.mu.Lock()
+		if blkStart > (f.length+int64(aesBlockSize-1))&^int64(aesBlockSize-1) {
+			f.isSparse = true
+		}
 		if newEnd := off + written; newEnd > f.length {
 			f.length = newEnd
 		}
@@ -178,6 +187,7 @@ func (f *File) ReadAt(p []byte, off int64) (int, error) {
 
 	f.mu.Lock()
 	length := f.length
+	sparse := f.isSparse
 	f.mu.Unlock()
 
 	if off >= length {
@@ -205,7 +215,9 @@ func (f *File) ReadAt(p []byte, off int64) (int, error) {
 	for i := 0; i < totalBlocks; i++ {
 		bs := i * aesBlockSize
 		blk := buf[bs : bs+aesBlockSize]
-		if isZero(blk) {
+		// Skip the per-block sparse check unless a write or truncate has
+		// actually left a never-written block on disk for us to find.
+		if sparse && isZero(blk) {
 			continue
 		}
 		var ks [aesBlockSize]byte
@@ -327,6 +339,11 @@ func (f *File) Truncate(size int64) error {
 		return err
 	}
 	f.mu.Lock()
+	if diskSize > (oldLen+int64(aesBlockSize-1))&^int64(aesBlockSize-1) {
+		// Extension past the previously-rounded length created at least
+		// one untouched block on disk.
+		f.isSparse = true
+	}
 	f.length = size
 	f.mu.Unlock()
 	return nil

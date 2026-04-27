@@ -163,6 +163,11 @@ func (f *File) WriteAt(p []byte, off int64) (int, error) {
 // ReadAt reads up to len(p) bytes at off, decrypting on the fly. Regions
 // of the backing file that read as all-zero AES blocks are treated as
 // sparse holes and returned as zeros (no decryption attempted).
+//
+// Sparse detection always inspects the full 16-byte AES block on disk,
+// even when the user's requested range covers only part of it — this is
+// what keeps the false-positive probability at 2^-128 per block regardless
+// of how much of the block falls inside the logical length.
 func (f *File) ReadAt(p []byte, off int64) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
@@ -191,12 +196,13 @@ func (f *File) ReadAt(p []byte, off int64) (int, error) {
 	if _, err := f.f.ReadAt(buf, alignedStart); err != nil && err != io.EOF {
 		return 0, err
 	}
-	// If the backing file came up short, the tail of buf is the zeros that
-	// make gave us, which the sparse-block check below treats as a hole.
-	valid := int(wantEnd - alignedStart)
+	// Disk size is kept aligned to aesBlockSize by WriteAt and Truncate, so
+	// every block in [alignedStart, alignedEnd) is fully present on disk
+	// (or all-zero from make if something external truncated it — that
+	// would be detected as sparse, which is the safe interpretation).
 
-	fullBlocks := valid / aesBlockSize
-	for i := 0; i < fullBlocks; i++ {
+	totalBlocks := len(buf) / aesBlockSize
+	for i := 0; i < totalBlocks; i++ {
 		bs := i * aesBlockSize
 		blk := buf[bs : bs+aesBlockSize]
 		if isZero(blk) {
@@ -206,17 +212,6 @@ func (f *File) ReadAt(p []byte, off int64) (int, error) {
 		f.fillKeystream(ks[:], alignedStart+int64(bs))
 		for j := range blk {
 			blk[j] ^= ks[j]
-		}
-	}
-	if rem := valid % aesBlockSize; rem != 0 {
-		bs := fullBlocks * aesBlockSize
-		blk := buf[bs : bs+rem]
-		if !isZero(blk) {
-			ks := make([]byte, rem)
-			f.fillKeystream(ks, alignedStart+int64(bs))
-			for j := range blk {
-				blk[j] ^= ks[j]
-			}
 		}
 	}
 
@@ -283,13 +278,52 @@ func (f *File) Seek(offset int64, whence int) (int64, error) {
 	return p, nil
 }
 
-// Truncate sets the logical (and on-disk) length of the file. Extending
-// creates a sparse hole; subsequent reads from the new region return zeros.
+// Truncate sets the logical length of the file. Extending creates a
+// sparse hole; subsequent reads from the new region return zeros.
+//
+// The on-disk size is rounded up to a multiple of the AES block so
+// ReadAt's sparse check always has 16 bytes of evidence. When shrinking
+// past a partial block, the bytes between the new length and the next
+// block boundary are re-encrypted as zeros so a later re-extension
+// doesn't surface old plaintext.
 func (f *File) Truncate(size int64) error {
 	if size < 0 {
 		return errors.New("tmpsecfile: negative size")
 	}
-	if err := f.f.Truncate(size); err != nil {
+	f.mu.Lock()
+	oldLen := f.length
+	f.mu.Unlock()
+
+	diskSize := (size + int64(aesBlockSize) - 1) &^ int64(aesBlockSize-1)
+
+	if size < oldLen && size%int64(aesBlockSize) != 0 {
+		blkStart := size &^ int64(aesBlockSize-1)
+		buf := make([]byte, aesBlockSize)
+		if _, err := f.f.ReadAt(buf, blkStart); err != nil && err != io.EOF {
+			return err
+		}
+		if !isZero(buf) {
+			var ks [aesBlockSize]byte
+			f.fillKeystream(ks[:], blkStart)
+			for i := range buf {
+				buf[i] ^= ks[i]
+			}
+		}
+		partial := int(size - blkStart)
+		for i := partial; i < aesBlockSize; i++ {
+			buf[i] = 0
+		}
+		var ks [aesBlockSize]byte
+		f.fillKeystream(ks[:], blkStart)
+		for i := range buf {
+			buf[i] ^= ks[i]
+		}
+		if _, err := f.f.WriteAt(buf, blkStart); err != nil {
+			return err
+		}
+	}
+
+	if err := f.f.Truncate(diskSize); err != nil {
 		return err
 	}
 	f.mu.Lock()

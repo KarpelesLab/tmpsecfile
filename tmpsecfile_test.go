@@ -283,6 +283,49 @@ func TestTruncateShrinks(t *testing.T) {
 	}
 }
 
+func TestSingleByteRoundTripAcrossAllValues(t *testing.T) {
+	// Every possible 1-byte plaintext must round-trip. Catches the bug
+	// where ReadAt would only inspect the partial bytes within length
+	// instead of the full 16-byte AES block on disk, giving any byte
+	// whose ciphertext happened to be 0 a 1-in-256 chance of being
+	// misread as a sparse hole.
+	for v := 0; v < 256; v++ {
+		f := newTest(t)
+		if _, err := f.WriteAt([]byte{byte(v)}, 0); err != nil {
+			t.Fatalf("WriteAt %d: %v", v, err)
+		}
+		got := make([]byte, 1)
+		n, err := f.ReadAt(got, 0)
+		if n != 1 || err != nil {
+			t.Fatalf("ReadAt %d: n=%d err=%v", v, n, err)
+		}
+		if got[0] != byte(v) {
+			t.Fatalf("byte %d round-tripped to %d", v, got[0])
+		}
+	}
+}
+
+func TestTruncateShrinkThenExtendDoesNotLeak(t *testing.T) {
+	f := newTest(t)
+	if _, err := f.WriteAt(bytes.Repeat([]byte("X"), 20), 0); err != nil {
+		t.Fatalf("WriteAt: %v", err)
+	}
+	if err := f.Truncate(10); err != nil {
+		t.Fatalf("Truncate(10): %v", err)
+	}
+	if err := f.Truncate(20); err != nil {
+		t.Fatalf("Truncate(20): %v", err)
+	}
+	got := make([]byte, 20)
+	if _, err := f.ReadAt(got, 0); err != nil {
+		t.Fatalf("ReadAt: %v", err)
+	}
+	want := append(bytes.Repeat([]byte("X"), 10), make([]byte, 10)...)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("re-extended region leaked old plaintext:\n got %q\nwant %q", got, want)
+	}
+}
+
 func TestAnonymousOnLinux(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("O_TMPFILE only on Linux")

@@ -90,7 +90,7 @@ func (*File) Close() error
 
 ## Caveats
 
-- **Whole-block false positive.** A real ciphertext block whose 16 bytes happen to all be zero will be treated as a sparse hole. Probability per block: 2⁻¹²⁸. For partial trailing blocks (when `length` is not a multiple of 16) the chance scales with the partial size — at the extreme, a 1-byte file has a 1-in-256 risk. Acceptable for the intended use case; if it's not for yours, this isn't the right library.
+- **Whole-block false positive.** A real ciphertext block whose 16 bytes happen to all be zero will be treated as a sparse hole. Probability per block: 2⁻¹²⁸. The check always inspects the full 16 bytes on disk, so this rate holds even for sub-block files (a 1-byte file is still backed by a full 16-byte block on disk and gets the full 128 bits of evidence).
 - **Process-lifetime only.** When the `*File` is closed (or the process exits) the data is unrecoverable. There is no API to persist the key.
 - **Memory hygiene.** The package does not zero key material on `Close`. Go's GC may keep the cipher state around after the `*File` is unreachable. If you need defense against in-process memory disclosure, wrap with `mlock` / `memguard` yourself.
 - **Anonymity on non-Linux.** macOS, BSD, and Linux without `O_TMPFILE` support get the `CreateTemp + Remove` fallback. The file is unlinked immediately, so it's gone from the directory listing, but on Windows the file may remain visible until close.

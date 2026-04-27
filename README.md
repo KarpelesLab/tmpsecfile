@@ -1,5 +1,8 @@
 # tmpsecfile
 
+[![test](https://github.com/KarpelesLab/tmpsecfile/actions/workflows/test.yml/badge.svg)](https://github.com/KarpelesLab/tmpsecfile/actions/workflows/test.yml)
+[![Coverage Status](https://coveralls.io/repos/github/KarpelesLab/tmpsecfile/badge.svg?branch=master)](https://coveralls.io/github/KarpelesLab/tmpsecfile?branch=master)
+[![Go Report Card](https://goreportcard.com/badge/github.com/KarpelesLab/tmpsecfile)](https://goreportcard.com/report/github.com/KarpelesLab/tmpsecfile)
 [![Go Reference](https://pkg.go.dev/badge/github.com/KarpelesLab/tmpsecfile.svg)](https://pkg.go.dev/github.com/KarpelesLab/tmpsecfile)
 
 A Go package that gives you a temporary file which is:
